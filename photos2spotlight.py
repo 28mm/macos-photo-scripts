@@ -52,6 +52,19 @@ def strip_junk(s):
 			idx = match_end_idx if match_end_idx > idx else idx
 	return s[idx:]
 
+
+def get_all_phrases(s):
+	words = s.split()
+	if len(words) == 1:
+		return words
+	phrases = []
+	for i in range(2, len(words) + 1):
+		phrases += get_phrases_of_len(i, words)
+	return words + phrases
+
+def get_phrases_of_len(length, words):
+	return [' '.join(words[i:i+length]) for i in range((len(words) - length) + 1)]
+
 def main():
 
 	parser = argparse.ArgumentParser('photos2spotlight: reconcile Photos.app metadata with Spotlight-indexed filesystem metadata.')
@@ -89,15 +102,14 @@ def main():
 	for row in rows:
 		img   = masters + '/' + row[0]
 
-		# 1st pass. Remove dates, locations, filenames, extensions.
-		# B/c they often collide with tags. 
-		descr = strip_junk(row[1]) 
+		# Remove dates, locations, filenames, extensions.
+		descr = strip_junk(row[1])
 
-		# 2nd pass. Check for categories in the description.
-		tags  = [ x for x in categories if x in descr ]
+		# Since we can't split on whitespace (some tags are two words,
+		# maybe more) generate all possible 1-grams, 2-grams, etc. 
+		phrases = get_all_phrases(descr)
 
-		# 3rd pass. We may have false positives from the 1st.
-		tags = [ x for x in tags if re.search(x + "\s+", descr) or re.search(x + '$', descr) ]
+		tags = list( set(phrases) & categories)
 
 		for tag in tags:
 			stats[tag] += 1
