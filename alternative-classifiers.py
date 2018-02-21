@@ -4,6 +4,8 @@ import os
 import re
 import argparse
 import sqlite3
+import json
+import subprocess
 
 from clarifai import rest
 from clarifai.rest import ClarifaiApp
@@ -144,7 +146,11 @@ def clarifai(db):
 
         # first try to classify the image, but bail if we don't have a /valid/ response
         try:
-            if not re.match(r'.*(jpg|JPG)$', img_path):
+
+            # bizarrely enough, the official Clarifai SDK base64-encodes images
+            # which I wouldn't have known if not for bumping repeatedly into
+            # their maximum allowed payload size: 10485760 bytes
+            if not re.match(r'.*(jpg|JPG)$', img_path) or os.stat(img_path).st_size * 4/3 > 10485760:
                 continue
             img = Image(file_obj=open(img_path, 'rb'))
             response = model.predict([img])
@@ -168,12 +174,65 @@ def clarifai(db):
             print('bad status')
             exit(1)
 
-def dump_json(db):
-    '''output database in a web-friendly format for visualization'''
-    for img in db.query('SELECT * FROM photos WHERE clarifai = 1'):
-        #db.query('SELECT * FROM ')
-        break
-        
+
+class Label:
+    def __init__(self, provider, name):
+        self.name        = name
+        self.provider    = provider
+        self.freq        = 1
+
+    def canonical(self):
+        return self.provider + '-' + self.name
+
+    @staticmethod
+    def canonicalize(row):
+        return row['provider'] + '-' + row['label']
+
+def dump_frequency_json(db):
+    labels = {}
+    for r in db.query('SELECT * FROM labels LEFT JOIN photos ON labels.photo_id = photos.id WHERE photos.clarifai = 1'):
+        canonical = Label.canonicalize(r)
+        if canonical in labels and labels[canonical] != None:
+            labels[canonical].freq += 1
+        else:
+            labels[canonical] = Label(r['provider'], r['label'])
+
+    _ = []
+    for c, label in labels.items():
+        _.append({ 'name' : label.name, 'provider' : label.provider, 'freq' : label.freq})
+    print(json.dumps(_))
+
+def plist(tags):
+	"""Assemble a list of tags into an xml plist"""
+	plist  = '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+	plist += '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+	plist += '<plist version="1.0"><array>'
+	for tag in tags:
+		plist += '<string>' + tag + '</string>' 
+	plist += '</array></plist>'
+	return plist
+
+def set_xattr(file, xattr, value):
+	"""Write, or over-write a given xattr."""
+	if subprocess.call(['xattr', '-w', xattr, value, file]) != 0:
+		raise
+
+def write_tags(file, tags):
+	"""Associate a list of tags with a file."""
+	set_xattr(file, 'com.apple.metadata:_kMDItemUserTags', plist(tags))
+
+def update_xattrs(db):
+    images = {}
+    for i in db.query('SELECT * FROM labels JOIN photos ON labels.photo_id = photos.id'):
+        f = db.photos_lib_path + '/Masters/' + i['filename']
+        if f in images and images[f] != None:
+            images[f].add(i['label'])
+        else:
+            images[f] = set()
+            images[f].add(i['label'])
+
+    for filename, tags in images.items():
+        write_tags(filename, list(tags))
 
 
 def main():
@@ -186,6 +245,7 @@ def main():
     parser.add_argument('--sync', dest='sync', action='store_const', const=True, default=False)
     parser.add_argument('--db', dest='db', required=True)
     parser.add_argument('--json', dest='json', action='store_const', const=True, default=False)
+    parser.add_argument('--xattrs', dest='xattrs', action='store_const', const=True, default=False)
     args = parser.parse_args()
 
     if args.init:
@@ -205,7 +265,11 @@ def main():
             
     if args.json:
         with DB(args.db) as db:
-            dump_json(db)
+            dump_frequency_json(db)
+
+    if args.xattrs:
+        with DB(args.db) as db:
+            update_xattrs(db)
 
 
 def strip_junk(s):
